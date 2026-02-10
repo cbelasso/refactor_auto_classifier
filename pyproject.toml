@@ -1,0 +1,25 @@
+[project]
+name = "refactor-auto-classifier"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+  "llm-parallelization",
+  "transformers[torch]>=4.30.0,<5.0.0",  # Changed this line
+
+]
+
+[tool.uv.sources]
+llm-parallelization = { git = "https://explorance-blue.visualstudio.com/Machine_Learning/_git/llm-parallelization" }
+
+[tool.uv.workspace]
+members = [
+    "lib/*",
+    "svc/*",
+]
+
+[dependency-groups]
+dev = [
+    "ipython>=9.10.0",
+]
