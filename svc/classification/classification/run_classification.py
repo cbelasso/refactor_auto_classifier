@@ -188,6 +188,17 @@ def main():
     save_dataframe(df_results, csv_output)
     print(f"✓ Saved CSV to: {csv_output}")
 
+    # Generate and save YAML usage report
+    yaml_report = classifier.generate_yaml_usage_report(max_stage=MAX_STAGE)  # Pass max_stage
+    report_file = RESULTS_DIR / "yaml_usage_report.txt"
+
+    with open(report_file, "w") as f:
+        f.write(yaml_report)
+    print(f"✓ Saved YAML usage report to: {report_file}")
+
+    # Also print to console
+    print("\n" + yaml_report)
+
     # ============================================================
     # Summary Statistics
     # ============================================================

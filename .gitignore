@@ -13,3 +13,5 @@ wheels/
 *.json
 *.csv
 *.xlsx
+*/prompt_templates
+prompt_templates/*

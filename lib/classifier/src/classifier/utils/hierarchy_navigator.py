@@ -4,20 +4,28 @@ Hierarchy Navigation Utilities
 Functions to extract and traverse hierarchical taxonomy structures.
 """
 
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
 class HierarchyNavigator:
     """Navigate and extract information from hierarchy JSON."""
 
-    def __init__(self, hierarchy: Dict[str, Any]):
+    def __init__(self, hierarchy_or_path):
         """
-        Initialize navigator with hierarchy dict.
+        Initialize navigator with hierarchy dict or path to JSON file.
 
         Args:
-            hierarchy: Loaded hierarchy JSON (from load_json or HierarchyBuilder)
+            hierarchy_or_path: Either the hierarchy dict or path to JSON file (str or Path)
         """
-        self.hierarchy = hierarchy
+        # Handle both dict and file path
+        if isinstance(hierarchy_or_path, (str, Path)):
+            from .data_io import load_json
+
+            self.hierarchy = load_json(hierarchy_or_path)
+        else:
+            self.hierarchy = hierarchy_or_path
+
         self._category_cache: Dict[str, Dict[str, Any]] = {}
         self._build_cache()
 

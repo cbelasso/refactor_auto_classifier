@@ -7,6 +7,7 @@ Multi-stage progressive classification system.
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+import pandas as pd
 from pydantic import BaseModel
 
 from .dynamic_schema import DynamicSchemaGenerator
@@ -46,23 +47,23 @@ class HierarchicalClassifier:
         hierarchy_path: str | Path,
         guided_config: Optional[Dict] = None,
     ):
-        """
-        Initialize the hierarchical classifier.
-
-        Args:
-            processor: NewProcessor instance
-            prompt_templates_dir: Path to YAML prompt templates
-            hierarchy_path: Path to JSON hierarchy schema
-            guided_config: Optional sampling params override
-        """
+        """Initialize the hierarchical classifier."""
         self.processor = processor
-        self.prompt_loader = PromptLoader(prompt_templates_dir)
+        self.prompt_loader = PromptLoader(prompt_templates_dir, hierarchy_path)
         self.schema_gen = DynamicSchemaGenerator(hierarchy_path)
         self.guided_config = guided_config or {
             "temperature": 0.1,
             "top_k": 50,
             "top_p": 0.95,
             "max_tokens": 1500,
+        }
+
+        # Track YAML usage for reporting
+        self.yaml_usage = {
+            "stage_1": {"used": set(), "skipped": set()},
+            "stage_2": {"used": set(), "skipped": set()},
+            "stage_3": {"used": set(), "skipped": set()},
+            "stage_4": {"used": set(), "skipped": set()},
         }
 
     def classify_comments(
@@ -136,6 +137,9 @@ class HierarchicalClassifier:
         """Run stage 1: category extraction."""
         prompts = [self.prompt_loader.load_stage1_prompt(c) for c in comments]
 
+        # Track Stage 1 usage
+        self.yaml_usage["stage_1"]["used"].add("Stage 1")
+
         # Generate dynamic schema
         Stage1Schema = self.schema_gen.get_stage1_schema()
 
@@ -162,8 +166,8 @@ class HierarchicalClassifier:
         batch_size: int,
     ) -> Dict[Tuple[int, str], BaseModel]:
         """Run stage 2: sub-category extraction per category."""
-        # Group tasks by category (so we can use category-specific schemas)
-        tasks_by_category = {}  # category -> [(comment_idx, comment, prompt)]
+        tasks_by_category = {}
+        skipped_categories = set()
 
         for comment_idx, stage1_result in stage1_results.items():
             comment = comments[comment_idx]
@@ -171,12 +175,24 @@ class HierarchicalClassifier:
                 category = cat_span.category
                 prompt = self.prompt_loader.load_stage2_prompt(comment, category)
 
+                if prompt is None:
+                    skipped_categories.add(category)
+                    self.yaml_usage["stage_2"]["skipped"].add(category)
+                    continue
+
+                self.yaml_usage["stage_2"]["used"].add(category)
+
                 if category not in tasks_by_category:
                     tasks_by_category[category] = []
                 tasks_by_category[category].append((comment_idx, comment, prompt))
 
+        if skipped_categories:
+            print(
+                f"  ⚠️  Skipped categories (no ready YAML): {', '.join(sorted(skipped_categories))}"
+            )
+
         if not tasks_by_category:
-            print("  No categories found, skipping stage 2")
+            print("  No categories with available YAMLs, skipping stage 2")
             return {}
 
         total_tasks = sum(len(tasks) for tasks in tasks_by_category.values())
@@ -184,13 +200,11 @@ class HierarchicalClassifier:
             f"  Processing {total_tasks} category contexts across {len(tasks_by_category)} categories"
         )
 
-        # Process each category separately with its own schema
         all_results = {}
 
         for category, category_tasks in tasks_by_category.items():
             print(f"    → {category}: {len(category_tasks)} tasks")
 
-            # Generate category-specific schema
             Stage2Schema = self.schema_gen.get_stage2_schema(category)
 
             task_indices = [(t[0], category) for t in category_tasks]
@@ -198,18 +212,17 @@ class HierarchicalClassifier:
 
             responses = self.processor.process_with_schema(
                 prompts=task_prompts,
-                schema=Stage2Schema,  # Category-specific schema!
+                schema=Stage2Schema,
                 batch_size=batch_size,
                 guided_config=self.guided_config,
             )
 
             parsed = self.processor.parse_results_with_schema(
-                schema=Stage2Schema,  # Category-specific schema!
+                schema=Stage2Schema,
                 responses=responses,
                 validate=True,
             )
 
-            # Collect results for this category
             for (comment_idx, cat), result in zip(task_indices, parsed):
                 if result is not None:
                     all_results[(comment_idx, cat)] = result
@@ -224,8 +237,8 @@ class HierarchicalClassifier:
         batch_size: int,
     ) -> Dict[Tuple[int, str, str], BaseModel]:
         """Run stage 3: element extraction per sub-category."""
-        # Group tasks by (category, sub_category)
-        tasks_by_subcat = {}  # (category, sub_category) -> [(comment_idx, comment, prompt)]
+        tasks_by_subcat = {}
+        skipped_subcategories = set()
 
         for (comment_idx, category), stage2_result in stage2_results.items():
             comment = comments[comment_idx]
@@ -233,13 +246,25 @@ class HierarchicalClassifier:
                 sub_category = subcat_span.sub_category
                 prompt = self.prompt_loader.load_stage3_prompt(comment, category, sub_category)
 
+                if prompt is None:
+                    skipped_subcategories.add(sub_category)
+                    self.yaml_usage["stage_3"]["skipped"].add(sub_category)
+                    continue
+
+                self.yaml_usage["stage_3"]["used"].add(sub_category)
+
                 key = (category, sub_category)
                 if key not in tasks_by_subcat:
                     tasks_by_subcat[key] = []
                 tasks_by_subcat[key].append((comment_idx, comment, prompt))
 
+        if skipped_subcategories:
+            print(
+                f"  ⚠️  Skipped sub-categories (no ready YAML): {', '.join(sorted(skipped_subcategories))}"
+            )
+
         if not tasks_by_subcat:
-            print("  No sub-categories found, skipping stage 3")
+            print("  No sub-categories with available YAMLs, skipping stage 3")
             return {}
 
         total_tasks = sum(len(tasks) for tasks in tasks_by_subcat.values())
@@ -247,13 +272,11 @@ class HierarchicalClassifier:
             f"  Processing {total_tasks} sub-category contexts across {len(tasks_by_subcat)} sub-categories"
         )
 
-        # Process each sub-category separately with its own schema
         all_results = {}
 
         for (category, sub_category), subcat_tasks in tasks_by_subcat.items():
             print(f"    → {category} / {sub_category}: {len(subcat_tasks)} tasks")
 
-            # Generate sub-category-specific schema
             Stage3Schema = self.schema_gen.get_stage3_schema(category, sub_category)
 
             task_indices = [(t[0], category, sub_category) for t in subcat_tasks]
@@ -272,7 +295,6 @@ class HierarchicalClassifier:
                 validate=True,
             )
 
-            # Collect results
             for (comment_idx, cat, subcat), result in zip(task_indices, parsed):
                 if result is not None:
                     all_results[(comment_idx, cat, subcat)] = result
@@ -288,8 +310,8 @@ class HierarchicalClassifier:
         batch_size: int,
     ) -> Dict[Tuple[int, str, str, str], BaseModel]:
         """Run stage 4: attribute extraction per element."""
-        # Group tasks by (category, sub_category, element)
-        tasks_by_element = {}  # (category, sub_category, element) -> [(comment_idx, comment, prompt)]
+        tasks_by_element = {}
+        skipped_elements = set()
 
         for (comment_idx, category, sub_category), stage3_result in stage3_results.items():
             comment = comments[comment_idx]
@@ -299,13 +321,25 @@ class HierarchicalClassifier:
                     comment, category, sub_category, element
                 )
 
+                if prompt is None:
+                    skipped_elements.add(element)
+                    self.yaml_usage["stage_4"]["skipped"].add(element)
+                    continue
+
+                self.yaml_usage["stage_4"]["used"].add(element)
+
                 key = (category, sub_category, element)
                 if key not in tasks_by_element:
                     tasks_by_element[key] = []
                 tasks_by_element[key].append((comment_idx, comment, prompt))
 
+        if skipped_elements:
+            print(
+                f"  ⚠️  Skipped elements (no ready YAML): {', '.join(sorted(skipped_elements))}"
+            )
+
         if not tasks_by_element:
-            print("  No elements found, skipping stage 4")
+            print("  No elements with available YAMLs, skipping stage 4")
             return {}
 
         total_tasks = sum(len(tasks) for tasks in tasks_by_element.values())
@@ -313,13 +347,11 @@ class HierarchicalClassifier:
             f"  Processing {total_tasks} element contexts across {len(tasks_by_element)} elements"
         )
 
-        # Process each element separately with its own schema
         all_results = {}
 
         for (category, sub_category, element), element_tasks in tasks_by_element.items():
             print(f"    → {category} / {sub_category} / {element}: {len(element_tasks)} tasks")
 
-            # Generate element-specific schema
             Stage4Schema = self.schema_gen.get_stage4_schema(category, sub_category, element)
 
             task_indices = [(t[0], category, sub_category, element) for t in element_tasks]
@@ -338,7 +370,6 @@ class HierarchicalClassifier:
                 validate=True,
             )
 
-            # Collect results
             for (comment_idx, cat, subcat, elem), result in zip(task_indices, parsed):
                 if result is not None:
                     all_results[(comment_idx, cat, subcat, elem)] = result
@@ -354,16 +385,13 @@ class HierarchicalClassifier:
         stage4_results: Optional[Dict[Tuple[int, str, str, str], BaseModel]] = None,
     ) -> List[FinalClassificationOutput]:
         """Combine all stage results into final output with full traceability."""
-
         final_outputs = []
 
         for comment_idx, comment in enumerate(comments):
             classifications = []
 
-            # Get stage 1 results
             stage1_result = stage1_results.get(comment_idx)
             if stage1_result is None:
-                # No classifications for this comment
                 final_outputs.append(
                     FinalClassificationOutput(
                         original_comment=comment,
@@ -380,7 +408,7 @@ class HierarchicalClassifier:
                             category=cat_span.category,
                             stage1_excerpt=cat_span.excerpt,
                             stage1_reasoning=cat_span.reasoning,
-                            stage1_sentiment=cat_span.sentiment,  # Read from .sentiment
+                            stage1_sentiment=cat_span.sentiment,
                         )
                     )
 
@@ -391,13 +419,12 @@ class HierarchicalClassifier:
                     stage2_result = stage2_results.get((comment_idx, category))
 
                     if stage2_result is None or not stage2_result.classifications:
-                        # Category detected but no sub-categories
                         classifications.append(
                             ClassificationSpan(
                                 category=category,
                                 stage1_excerpt=cat_span.excerpt,
                                 stage1_reasoning=cat_span.reasoning,
-                                stage1_sentiment=cat_span.sentiment,  # Read from .sentiment
+                                stage1_sentiment=cat_span.sentiment,
                             )
                         )
                     else:
@@ -407,11 +434,11 @@ class HierarchicalClassifier:
                                     category=category,
                                     stage1_excerpt=cat_span.excerpt,
                                     stage1_reasoning=cat_span.reasoning,
-                                    stage1_sentiment=cat_span.sentiment,  # Read from .sentiment
+                                    stage1_sentiment=cat_span.sentiment,
                                     sub_category=subcat_span.sub_category,
                                     stage2_excerpt=subcat_span.excerpt,
                                     stage2_reasoning=subcat_span.reasoning,
-                                    stage2_sentiment=subcat_span.sentiment,  # Read from .sentiment
+                                    stage2_sentiment=subcat_span.sentiment,
                                 )
                             )
 
@@ -436,11 +463,11 @@ class HierarchicalClassifier:
                                     category=category,
                                     stage1_excerpt=cat_span.excerpt,
                                     stage1_reasoning=cat_span.reasoning,
-                                    stage1_sentiment=cat_span.sentiment,  # Read from .sentiment
+                                    stage1_sentiment=cat_span.sentiment,
                                     sub_category=sub_category,
                                     stage2_excerpt=subcat_span.excerpt,
                                     stage2_reasoning=subcat_span.reasoning,
-                                    stage2_sentiment=subcat_span.sentiment,  # Read from .sentiment
+                                    stage2_sentiment=subcat_span.sentiment,
                                 )
                             )
                         else:
@@ -450,15 +477,15 @@ class HierarchicalClassifier:
                                         category=category,
                                         stage1_excerpt=cat_span.excerpt,
                                         stage1_reasoning=cat_span.reasoning,
-                                        stage1_sentiment=cat_span.sentiment,  # Read from .sentiment
+                                        stage1_sentiment=cat_span.sentiment,
                                         sub_category=sub_category,
                                         stage2_excerpt=subcat_span.excerpt,
                                         stage2_reasoning=subcat_span.reasoning,
-                                        stage2_sentiment=subcat_span.sentiment,  # Read from .sentiment
+                                        stage2_sentiment=subcat_span.sentiment,
                                         element=elem_span.element,
                                         stage3_excerpt=elem_span.excerpt,
                                         stage3_reasoning=elem_span.reasoning,
-                                        stage3_sentiment=elem_span.sentiment,  # Read from .sentiment
+                                        stage3_sentiment=elem_span.sentiment,
                                     )
                                 )
 
@@ -492,15 +519,15 @@ class HierarchicalClassifier:
                                         category=category,
                                         stage1_excerpt=cat_span.excerpt,
                                         stage1_reasoning=cat_span.reasoning,
-                                        stage1_sentiment=cat_span.sentiment,  # Read from .sentiment
+                                        stage1_sentiment=cat_span.sentiment,
                                         sub_category=sub_category,
                                         stage2_excerpt=subcat_span.excerpt,
                                         stage2_reasoning=subcat_span.reasoning,
-                                        stage2_sentiment=subcat_span.sentiment,  # Read from .sentiment
+                                        stage2_sentiment=subcat_span.sentiment,
                                         element=element,
                                         stage3_excerpt=elem_span.excerpt,
                                         stage3_reasoning=elem_span.reasoning,
-                                        stage3_sentiment=elem_span.sentiment,  # Read from .sentiment
+                                        stage3_sentiment=elem_span.sentiment,
                                     )
                                 )
                             else:
@@ -510,19 +537,19 @@ class HierarchicalClassifier:
                                             category=category,
                                             stage1_excerpt=cat_span.excerpt,
                                             stage1_reasoning=cat_span.reasoning,
-                                            stage1_sentiment=cat_span.sentiment,  # Read from .sentiment
+                                            stage1_sentiment=cat_span.sentiment,
                                             sub_category=sub_category,
                                             stage2_excerpt=subcat_span.excerpt,
                                             stage2_reasoning=subcat_span.reasoning,
-                                            stage2_sentiment=subcat_span.sentiment,  # Read from .sentiment
+                                            stage2_sentiment=subcat_span.sentiment,
                                             element=element,
                                             stage3_excerpt=elem_span.excerpt,
                                             stage3_reasoning=elem_span.reasoning,
-                                            stage3_sentiment=elem_span.sentiment,  # Read from .sentiment
+                                            stage3_sentiment=elem_span.sentiment,
                                             attribute=attr_span.attribute,
                                             stage4_excerpt=attr_span.excerpt,
                                             stage4_reasoning=attr_span.reasoning,
-                                            stage4_sentiment=attr_span.sentiment,  # Read from .sentiment
+                                            stage4_sentiment=attr_span.sentiment,
                                         )
                                     )
 
@@ -535,12 +562,159 @@ class HierarchicalClassifier:
 
         return final_outputs
 
-    def results_to_dataframe(self, results: List[FinalClassificationOutput]):
-        """Convert results to pandas DataFrame (exploded format)."""
-        import pandas as pd
+    def generate_yaml_usage_report(self, max_stage: int) -> str:
+        """Generate a report of which YAMLs were used vs skipped."""
+        report_lines = []
+        report_lines.append("=" * 70)
+        report_lines.append("YAML USAGE REPORT")
+        report_lines.append("=" * 70)
+        report_lines.append("")
 
+        # Stage 1
+        report_lines.append("STAGE 1")
+        report_lines.append("-" * 70)
+        report_lines.append("✓ USED (1):")
+        report_lines.append("  ✓ category_prompt.yaml")
+        report_lines.append("")
+        report_lines.append("⊘ SKIPPED (0): All available YAMLs were used")
+        report_lines.append("")
+        report_lines.append("")
+
+        # Stages 2, 3, 4
+        stage_info = {
+            "stage_2": ("categories", lambda: self.prompt_loader.navigator.get_categories()),
+            "stage_3": ("sub-categories", lambda: self._get_all_subcategories()),
+            "stage_4": ("elements", lambda: self._get_all_elements()),
+        }
+
+        for stage_num in [2, 3, 4]:
+            stage = f"stage_{stage_num}"
+            label_type, get_labels_func = stage_info[stage]
+
+            report_lines.append(f"STAGE {stage_num}")
+            report_lines.append("-" * 70)
+
+            if stage_num <= max_stage:
+                used = sorted(self.yaml_usage[stage]["used"])
+                skipped = sorted(self.yaml_usage[stage]["skipped"])
+
+                if used:
+                    report_lines.append(f"✓ USED ({len(used)}):")
+                    for item in used:
+                        filename = self.prompt_loader._label_to_filename(item)
+                        report_lines.append(f"  ✓ {filename} ({item})")
+                else:
+                    report_lines.append("✓ USED (0): None")
+
+                report_lines.append("")
+
+                if skipped:
+                    report_lines.append(f"⊘ SKIPPED ({len(skipped)}):")
+                    for item in skipped:
+                        filename = self.prompt_loader._label_to_filename(item)
+                        report_lines.append(
+                            f"  ⊘ {filename} ({item}) - YAML not ready or missing"
+                        )
+                else:
+                    all_labels = get_labels_func()
+                    not_encountered = [l for l in all_labels if l not in used]
+
+                    if not_encountered:
+                        report_lines.append(f"⊘ NOT ENCOUNTERED ({len(not_encountered)}):")
+                        for item in sorted(not_encountered):
+                            filename = self.prompt_loader._label_to_filename(item)
+                            yaml_path = self.prompt_loader.templates_dir / stage / filename
+                            if yaml_path.exists():
+                                is_ready = self.prompt_loader._is_yaml_ready(yaml_path)
+                                status = "ready but not needed" if is_ready else "not ready"
+                                report_lines.append(f"  ⊘ {filename} ({item}) - {status}")
+                            else:
+                                report_lines.append(f"  ⊘ {filename} ({item}) - file missing")
+                    else:
+                        report_lines.append("⊘ SKIPPED (0): All available YAMLs were used")
+            else:
+                all_labels = get_labels_func()
+                ready_files = []
+                not_ready_files = []
+                missing_files = []
+
+                for label in all_labels:
+                    filename = self.prompt_loader._label_to_filename(label)
+                    yaml_path = self.prompt_loader.templates_dir / stage / filename
+
+                    if not yaml_path.exists():
+                        missing_files.append((filename, label))
+                    elif self.prompt_loader._is_yaml_ready(yaml_path):
+                        ready_files.append((filename, label))
+                    else:
+                        not_ready_files.append((filename, label))
+
+                report_lines.append(f"(Stage not run - max_stage={max_stage})")
+                report_lines.append("")
+
+                if ready_files:
+                    report_lines.append(f"✓ READY ({len(ready_files)}):")
+                    for filename, label in sorted(ready_files):
+                        report_lines.append(f"  ✓ {filename} ({label})")
+                else:
+                    report_lines.append("✓ READY (0): None")
+
+                report_lines.append("")
+
+                if not_ready_files:
+                    report_lines.append(f"⊘ NOT READY ({len(not_ready_files)}):")
+                    for filename, label in sorted(not_ready_files):
+                        report_lines.append(f"  ⊘ {filename} ({label}) - ready: false")
+
+                if missing_files:
+                    if not not_ready_files:
+                        report_lines.append("")
+                    report_lines.append(f"✗ MISSING ({len(missing_files)}):")
+                    for filename, label in sorted(missing_files):
+                        report_lines.append(f"  ✗ {filename} ({label}) - file not found")
+
+                if not not_ready_files and not missing_files:
+                    report_lines.append("⊘ NOT READY (0): All files ready")
+
+            report_lines.append("")
+            report_lines.append("")
+
+        report_lines.append("=" * 70)
+        report_lines.append("SUMMARY")
+        report_lines.append("=" * 70)
+
+        total_used = sum(
+            len(self.yaml_usage[s]["used"])
+            for s in ["stage_1", "stage_2", "stage_3", "stage_4"]
+        )
+        total_skipped = sum(
+            len(self.yaml_usage[s]["skipped"])
+            for s in ["stage_1", "stage_2", "stage_3", "stage_4"]
+        )
+
+        report_lines.append(f"Total YAMLs used (stages 1-{max_stage}): {total_used + 1}")
+        report_lines.append(f"Total YAMLs skipped (stages 1-{max_stage}): {total_skipped}")
+
+        return "\n".join(report_lines)
+
+    def _get_all_subcategories(self):
+        """Get all unique sub-categories across all categories."""
+        subcats = set()
+        for cat in self.prompt_loader.navigator.get_categories():
+            subcats.update(self.prompt_loader.navigator.get_subcategories(cat))
+        return sorted(subcats)
+
+    def _get_all_elements(self):
+        """Get all unique elements across all sub-categories."""
+        elements = set()
+        for cat in self.prompt_loader.navigator.get_categories():
+            for subcat in self.prompt_loader.navigator.get_subcategories(cat):
+                elements.update(self.prompt_loader.navigator.get_elements(cat, subcat))
+        return sorted(elements)
+
+    def results_to_dataframe(self, results: List[FinalClassificationOutput]) -> pd.DataFrame:
+        """Convert classification results to pandas DataFrame."""
         all_records = []
         for result in results:
             all_records.extend(result.to_records())
-
         return pd.DataFrame(all_records)
