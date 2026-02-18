@@ -24,6 +24,7 @@ from .draft_classifier import (
 from .utils import (
     HierarchyBuilder,
     HierarchyNavigator,
+    ShorthandUpdater,
     build_hierarchy,
     load_json,
     read_tabular_file,
@@ -56,6 +57,7 @@ __all__ = [
     # Utils
     "HierarchyBuilder",
     "HierarchyNavigator",
+    "ShorthandUpdater",
     "load_json",
     "save_json",
     "read_tabular_file",

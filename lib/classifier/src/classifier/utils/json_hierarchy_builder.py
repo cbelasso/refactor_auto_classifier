@@ -88,6 +88,12 @@ class HierarchyBuilder:
         "exclusions": ["exclusions", "exclusion", "excludes", "exclude"],
         "keywords": ["keywords", "keyword", "tags", "tag"],
         "decision rule": ["decision rule", "decision_rule", "decision rules", "rule"],
+        "shorthand_description": [
+            "shorthand_description",
+            "shorthand",
+            "short_description",
+            "prompt_description",
+        ],
     }
 
     def __init__(self, root_name: str = "World", sheet_name: str | int | None = None):
@@ -238,6 +244,7 @@ class HierarchyBuilder:
         exclusions: str = "",
         keywords: list[str] | None = None,
         decision_rule: str = "",
+        shorthand_description: str = "",
     ) -> dict[str, Any]:
         """Create a hierarchy node with all required fields."""
         keywords = keywords or []
@@ -251,6 +258,7 @@ class HierarchyBuilder:
             "keywords": keywords,
             "definition": definition,
             "description": description,
+            "shorthand_description": shorthand_description,
             "scope": scope,
             "inclusions": inclusions,
             "exclusions": exclusions,
@@ -272,10 +280,12 @@ class HierarchyBuilder:
         exclusions: str,
         keywords: list[str],
         decision_rule: str,
+        shorthand_description: str = "",
     ):
         """Update an existing node with new metadata."""
         node["description"] = description
         node["definition"] = definition
+        node["shorthand_description"] = shorthand_description
         node["inclusions"] = inclusions
         node["exclusions"] = exclusions
         node["keywords"] = keywords

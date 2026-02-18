@@ -16,6 +16,7 @@ from .json_hierarchy_builder import (
     HierarchyBuilder,
     build_hierarchy,
 )
+from .shorthand_updater import ShorthandUpdater
 
 __all__ = [
     # Data I/O
@@ -30,4 +31,6 @@ __all__ = [
     "build_hierarchy",
     # Hierarchy Navigator
     "HierarchyNavigator",
+    # Shorthand Updater
+    "ShorthandUpdater",
 ]

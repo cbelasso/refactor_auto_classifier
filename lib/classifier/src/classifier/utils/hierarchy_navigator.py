@@ -259,3 +259,17 @@ class HierarchyNavigator:
                         lines.append(f"{prefix_attr} {attr}")
 
         return "\n".join(lines)
+
+    def get_shorthand_description(self, node: Dict[str, Any]) -> str:
+        """Extract shorthand description from a node."""
+        return node.get("shorthand_description", "")
+
+    def get_category_shorthand(self, category: str) -> str:
+        """Get shorthand description for a category."""
+        node = self.get_category_node(category)
+        return node.get("shorthand_description", "") if node else ""
+
+    def get_subcategory_shorthand(self, category: str, subcategory: str) -> str:
+        """Get shorthand description for a subcategory."""
+        node = self.get_subcategory_node(category, subcategory)
+        return node.get("shorthand_description", "") if node else ""
